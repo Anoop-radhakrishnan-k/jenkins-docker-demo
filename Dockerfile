@@ -1,14 +1,12 @@
-
-FROM python:3.12-slim
+FROM node:20-alpine
 
 WORKDIR /app
 
-COPY app.py .
+COPY package.json app.js test.js ./
 
-ENV APP_VERSION=1.0
+ENV PORT=3000
+ENV APP_VERSION=container
 
-EXPOSE 8000
+EXPOSE 3000
 
-HEALTHCHECK --interval=10s --timeout=3s --retries=3 CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"
-
-CMD ["python", "app.py"]
+CMD ["npm", "start"]

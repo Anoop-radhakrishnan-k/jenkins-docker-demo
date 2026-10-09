@@ -1,98 +1,252 @@
-
 pipeline {
     agent any
 
     parameters {
-        string(
-            name: 'APP_VERSION',
-            defaultValue: '1.0',
-            description: 'Version displayed by the application'
+        choice(
+            name: 'DEPLOY_ACTION',
+            choices: ['deploy', 'bad-deploy', 'rollback'],
+            description: 'Choose the CI/CD action'
         )
     }
 
     environment {
-        IMAGE_NAME = 'cicd-demo'
+        IMAGE_NAME = 'jenkins-docker-demo'
         SERVICE_NAME = 'cicd-demo'
-        APP_PORT = '8088'
+        DOCKER_CLI = 'C:\\Users\\ANOOP\\AppData\\Local\\Programs\\DockerDesktop\\resources\\bin\\docker.exe'
     }
 
     stages {
         stage('Checkout') {
             steps {
                 checkout scm
-                bat 'git log -1 --oneline'
+                echo 'GitHub source code checked out.'
             }
         }
 
-        stage('Test') {
+        stage('Build') {
+            when {
+                expression { params.DEPLOY_ACTION != 'rollback' }
+            }
             steps {
-                bat '''
-                    docker run --rm ^
-                      --mount "type=bind,source=%WORKSPACE%,target=/src" ^
-                      -w /src ^
-                      python:3.12-slim ^
-                      python -m unittest -v test_app
+                powershell '''
+                    $ErrorActionPreference = "Stop"
+                    node --version
+                    npm --version
+                    npm test
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Application build/test preparation failed"
+                    }
                 '''
             }
         }
 
-        stage('Build Docker Image') {
+        stage('Test') {
+            when {
+                expression { params.DEPLOY_ACTION != 'rollback' }
+            }
             steps {
-                bat '''
-                    docker build -t %IMAGE_NAME%:%BUILD_NUMBER% .
-                    docker image ls %IMAGE_NAME%
+                powershell '''
+                    $ErrorActionPreference = "Stop"
+                    npm test
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Automated tests failed"
+                    }
+                '''
+            }
+        }
+
+        stage('Docker Build') {
+            when {
+                expression { params.DEPLOY_ACTION != 'rollback' }
+            }
+            steps {
+                powershell '''
+                    $ErrorActionPreference = "Stop"
+
+                    if (!(Test-Path $env:DOCKER_CLI)) {
+                        throw "Docker CLI not found at $env:DOCKER_CLI"
+                    }
+
+                    & $env:DOCKER_CLI info
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Jenkins cannot connect to Docker Engine"
+                    }
+
+                    $image = "$env:IMAGE_NAME`:$env:BUILD_NUMBER"
+
+                    & $env:DOCKER_CLI build -t $image .
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Docker image build failed"
+                    }
+
+                    & $env:DOCKER_CLI image ls $env:IMAGE_NAME
                 '''
             }
         }
 
         stage('Deploy') {
+            when {
+                expression { params.DEPLOY_ACTION != 'rollback' }
+            }
             steps {
-                bat '''
-                    docker info
-                    docker swarm init 2>nul
-                    if errorlevel 1 (
-                        docker info --format "{{.Swarm.LocalNodeState}}" | findstr /i "active"
-                        if errorlevel 1 exit /b 1
-                    )
+                powershell '''
+                    $ErrorActionPreference = "Stop"
+
+                    $swarm = & $env:DOCKER_CLI info --format '{{.Swarm.LocalNodeState}}'
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Unable to read Docker Swarm state"
+                    }
+
+                    if ($swarm.Trim() -ne "active") {
+                        & $env:DOCKER_CLI swarm init
+                        if ($LASTEXITCODE -ne 0) {
+                            throw "Docker Swarm initialization failed"
+                        }
+                    }
+
+                    $existing = & $env:DOCKER_CLI service inspect $env:SERVICE_NAME 2>$null
+                    $serviceExists = ($LASTEXITCODE -eq 0)
+
+                    if (-not $serviceExists) {
+                        if ($env:DEPLOY_ACTION -eq "bad-deploy") {
+                            throw "Deploy a working version before simulating failure"
+                        }
+
+                        $image = "$env:IMAGE_NAME`:$env:BUILD_NUMBER"
+
+                        & $env:DOCKER_CLI service create `
+                            --name $env:SERVICE_NAME `
+                            --replicas 3 `
+                            --publish published=8080,target=3000 `
+                            --update-parallelism 1 `
+                            --update-delay 10s `
+                            --env "APP_VERSION=$env:BUILD_NUMBER" `
+                            $image
+
+                        if ($LASTEXITCODE -ne 0) {
+                            throw "Service creation failed"
+                        }
+                    }
+                    elseif ($env:DEPLOY_ACTION -eq "bad-deploy") {
+                        & $env:DOCKER_CLI service update `
+                            --update-parallelism 1 `
+                            --update-delay 10s `
+                            --image nginx:nonexistent-cicd-tag `
+                            $env:SERVICE_NAME
+
+                        throw "Controlled failure introduced. Run rollback next."
+                    }
+                    else {
+                        $image = "$env:IMAGE_NAME`:$env:BUILD_NUMBER"
+
+                        & $env:DOCKER_CLI service update `
+                            --update-parallelism 1 `
+                            --update-delay 10s `
+                            --env-rm APP_VERSION `
+                            --env-add "APP_VERSION=$env:BUILD_NUMBER" `
+                            --image $image `
+                            $env:SERVICE_NAME
+
+                        if ($LASTEXITCODE -ne 0) {
+                            throw "Service update failed"
+                        }
+                    }
+
+                    & $env:DOCKER_CLI service ps $env:SERVICE_NAME
                 '''
-
-                script {
-                    bat '''
-                        docker service inspect %SERVICE_NAME% >nul 2>nul
-                        if errorlevel 1 (
-                            docker service create ^
-                              --name %SERVICE_NAME% ^
-                              --replicas 2 ^
-                              --publish published=8088,target=8000 ^
-                              --env APP_VERSION=%APP_VERSION% ^
-                              --update-parallelism 1 ^
-                              --update-delay 10s ^
-                              --update-order start-first ^
-                              --update-failure-action rollback ^
-                              %IMAGE_NAME%:%BUILD_NUMBER%
-                            if errorlevel 1 exit /b 1
-                        ) else (
-                            docker service update ^
-                              --image %IMAGE_NAME%:%BUILD_NUMBER% ^
-                              --env-add APP_VERSION=%APP_VERSION% ^
-                              --update-parallelism 1 ^
-                              --update-delay 10s ^
-                              --update-order start-first ^
-                              --update-failure-action rollback ^
-                              %SERVICE_NAME%
-                            if errorlevel 1 exit /b 1
-                        )
-                    '''
-                }
-
-                bat 'docker service ps %SERVICE_NAME%'
             }
         }
 
         stage('Verify') {
+            when {
+                expression { params.DEPLOY_ACTION == 'deploy' }
+            }
             steps {
-                bat '''
-                    powershell -NoProfile -ExecutionPolicy Bypass -Command "$ok=$false; for($i=0;$i -lt 24;$i++){try{$r=Invoke-RestMethod 'http://localhost:8088/'; if($r.status -eq 'Running' -and $r.version -eq $env:APP_VERSION){$r | ConvertTo-Json; $ok=$true; break}}catch{}; Start-Sleep -Seconds 5}; if(-not $ok){throw 'Application verification failed'}"
+                powershell '''
+                    $ErrorActionPreference = "Stop"
+                    $verified = $false
+
+                    for ($i = 0; $i -lt 30; $i++) {
+                        $tasks = & $env:DOCKER_CLI service ps `
+                            --filter "desired-state=running" `
+                            --format '{{.CurrentState}}' $env:SERVICE_NAME
+
+                        $running = @($tasks | Where-Object {
+                            $_ -match '^Running'
+                        }).Count
+
+                        try {
+                            $r = Invoke-RestMethod `
+                                -Uri "http://localhost:8080/health" `
+                                -TimeoutSec 3
+
+                            if ($running -ge 3 -and
+                                $r.status -eq "healthy" -and
+                                "$($r.version)" -eq "$env:BUILD_NUMBER") {
+                                $verified = $true
+                                break
+                            }
+                        }
+                        catch {
+                            Start-Sleep -Seconds 5
+                        }
+
+                        Start-Sleep -Seconds 3
+                    }
+
+                    & $env:DOCKER_CLI service ps $env:SERVICE_NAME
+
+                    if (-not $verified) {
+                        throw "Deployment verification failed"
+                    }
+
+                    Write-Host "New version verified successfully."
+                    Invoke-RestMethod -Uri "http://localhost:8080/health"
+                '''
+            }
+        }
+
+        stage('Rollback') {
+            when {
+                expression { params.DEPLOY_ACTION == 'rollback' }
+            }
+            steps {
+                powershell '''
+                    $ErrorActionPreference = "Stop"
+
+                    & $env:DOCKER_CLI service rollback $env:SERVICE_NAME
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Docker service rollback failed"
+                    }
+
+                    $verified = $false
+
+                    for ($i = 0; $i -lt 30; $i++) {
+                        try {
+                            $r = Invoke-RestMethod `
+                                -Uri "http://localhost:8080/health" `
+                                -TimeoutSec 3
+
+                            if ($r.status -eq "healthy") {
+                                $verified = $true
+                                break
+                            }
+                        }
+                        catch {
+                            Start-Sleep -Seconds 5
+                        }
+
+                        Start-Sleep -Seconds 3
+                    }
+
+                    & $env:DOCKER_CLI service ps $env:SERVICE_NAME
+
+                    if (-not $verified) {
+                        throw "Rollback health verification failed"
+                    }
+
+                    Write-Host "Rollback completed; health check passed."
+                    Invoke-RestMethod -Uri "http://localhost:8080/health"
                 '''
             }
         }
@@ -100,10 +254,13 @@ pipeline {
 
     post {
         success {
-            echo 'CI/CD pipeline completed successfully.'
+            echo 'Selected pipeline action completed successfully.'
         }
         failure {
             echo 'Pipeline failed. Check Console Output.'
+        }
+        always {
+            echo 'CI/CD pipeline execution finished.'
         }
     }
 }
