@@ -34,7 +34,6 @@ pipeline {
                     node --version
                     npm --version
                     npm test
-
                     if ($LASTEXITCODE -ne 0) {
                         throw "Application tests failed"
                     }
@@ -50,7 +49,6 @@ pipeline {
                 powershell '''
                     $ErrorActionPreference = "Stop"
                     npm test
-
                     if ($LASTEXITCODE -ne 0) {
                         throw "Automated tests failed"
                     }
@@ -65,20 +63,21 @@ pipeline {
             steps {
                 powershell '''
                     $ErrorActionPreference = "Stop"
+                    $docker = $env:DOCKER_CLI
 
-                    & $env:DOCKER_CLI info
+                    & $docker info
                     if ($LASTEXITCODE -ne 0) {
                         throw "Docker Engine unavailable"
                     }
 
                     $image = "$env:IMAGE_NAME`:$env:BUILD_NUMBER"
 
-                    & $env:DOCKER_CLI build -t $image .
+                    & $docker build -t $image .
                     if ($LASTEXITCODE -ne 0) {
                         throw "Docker build failed"
                     }
 
-                    & $env:DOCKER_CLI image ls $env:IMAGE_NAME
+                    & $docker image ls $env:IMAGE_NAME
                 '''
             }
         }
@@ -90,7 +89,6 @@ pipeline {
             steps {
                 powershell '''
                     $ErrorActionPreference = "Stop"
-
                     $docker = $env:DOCKER_CLI
                     $service = $env:SERVICE_NAME
                     $image = "$env:IMAGE_NAME`:$env:BUILD_NUMBER"
@@ -132,7 +130,7 @@ pipeline {
                         & $docker service create `
                             --name $service `
                             --replicas 3 `
-                            --publish published=8080,target=3000 `
+                            --publish published=8081,target=3000 `
                             --update-parallelism 1 `
                             --update-delay 10s `
                             --env "APP_VERSION=$env:BUILD_NUMBER" `
@@ -174,10 +172,10 @@ pipeline {
                     $verified = $false
 
                     for ($i = 0; $i -lt 30; $i++) {
-                        $tasks = & $env:DOCKER_CLI service ps `
+                        $tasks = @(& $env:DOCKER_CLI service ps `
                             --filter "desired-state=running" `
                             --format '{{.CurrentState}}' `
-                            $env:SERVICE_NAME
+                            $env:SERVICE_NAME)
 
                         $running = @($tasks | Where-Object {
                             $_ -match '^Running'
@@ -185,7 +183,7 @@ pipeline {
 
                         try {
                             $response = Invoke-RestMethod `
-                                -Uri "http://localhost:8080/health" `
+                                -Uri "http://localhost:8081/health" `
                                 -TimeoutSec 3
 
                             if ($running -ge 3 -and
@@ -196,7 +194,7 @@ pipeline {
                             }
                         }
                         catch {
-                            Start-Sleep -Seconds 5
+                            Write-Host "Waiting for application health check..."
                         }
 
                         Start-Sleep -Seconds 3
@@ -205,11 +203,11 @@ pipeline {
                     & $env:DOCKER_CLI service ps $env:SERVICE_NAME
 
                     if (-not $verified) {
-                        throw "Deployment verification failed"
+                        throw "Deployment verification failed. Check port 8081 and service logs."
                     }
 
                     Write-Host "New application version verified."
-                    Invoke-RestMethod http://localhost:8080/health
+                    Invoke-RestMethod "http://localhost:8081/health"
                 '''
             }
         }
@@ -238,12 +236,13 @@ pipeline {
                         throw "Docker service rollback failed"
                     }
 
-                    $verified = $false
+                    & $docker service ps $service
 
+                    $verified = $false
                     for ($i = 0; $i -lt 30; $i++) {
                         try {
                             $response = Invoke-RestMethod `
-                                -Uri "http://localhost:8080/health" `
+                                -Uri "http://localhost:8081/health" `
                                 -TimeoutSec 3
 
                             if ($response.status -eq "healthy") {
@@ -252,20 +251,18 @@ pipeline {
                             }
                         }
                         catch {
-                            Start-Sleep -Seconds 5
+                            Write-Host "Waiting for rollback health check..."
                         }
 
                         Start-Sleep -Seconds 3
                     }
-
-                    & $docker service ps $service
 
                     if (-not $verified) {
                         throw "Rollback health verification failed"
                     }
 
                     Write-Host "Rollback completed; health check passed."
-                    Invoke-RestMethod http://localhost:8080/health
+                    Invoke-RestMethod "http://localhost:8081/health"
                 '''
             }
         }
