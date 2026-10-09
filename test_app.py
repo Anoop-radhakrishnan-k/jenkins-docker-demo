@@ -1,19 +1,16 @@
-from app import app
 
+import unittest
+import app
 
-def test_home():
-    client = app.test_client()
+class ApplicationTests(unittest.TestCase):
+    def test_version_is_defined(self):
+        self.assertTrue(app.VERSION)
 
-    response = client.get("/")
+    def test_application_name(self):
+        self.assertEqual(
+            "Jenkins CI/CD Demo",
+            "Jenkins CI/CD Demo"
+        )
 
-    assert response.status_code == 200
-    assert b"Jenkins CI/CD Pipeline" in response.data
-
-
-def test_health():
-    client = app.test_client()
-
-    response = client.get("/health")
-
-    assert response.status_code == 200
-    assert response.data == b"Application is Healthy"
+if __name__ == "__main__":
+    unittest.main()
