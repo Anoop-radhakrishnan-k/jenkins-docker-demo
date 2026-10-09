@@ -1,3 +1,4 @@
+
 const http = require("http");
 
 const PORT = process.env.PORT || 3000;
@@ -8,15 +9,11 @@ const server = http.createServer((req, res) => {
         res.writeHead(200, {
             "Content-Type": "application/json"
         });
+
         return res.end(JSON.stringify({
             status: "healthy",
             version: VERSION
         }));
-    }
-
-    if (req.url === "/fail") {
-        res.writeHead(500);
-        return res.end("Controlled deployment failure");
     }
 
     res.writeHead(200, {
@@ -26,12 +23,14 @@ const server = http.createServer((req, res) => {
     res.end(`
         <!DOCTYPE html>
         <html>
-        <head><title>Jenkins CI/CD Demo</title></head>
+        <head>
+            <title>Jenkins CI/CD Demo</title>
+        </head>
         <body style="font-family:Arial;text-align:center;margin-top:80px">
             <h1>Jenkins CI/CD Deployment Successful</h1>
             <h2>Version: ${VERSION}</h2>
-            <p>Application is running inside Docker.</p>
-            <a href="/health">Check Application Health</a>
+            <p>Docker deployment is running.</p>
+            <a href="/health">Check Health</a>
         </body>
         </html>
     `);
